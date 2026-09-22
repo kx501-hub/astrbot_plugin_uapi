@@ -26,10 +26,11 @@ from pydantic.dataclasses import dataclass
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star
 from astrbot.api import logger, AstrBotConfig, FunctionTool
-from astrbot.api.message_components import Plain, Record
+from astrbot.api.message_components import Image, Plain, Record
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
+from astrbot.core.utils.t2i.local_strategy import LocalRenderStrategy
 
 from .uapi_client import UAPIClient
 from .api_registry import API_DEFINITIONS, API_MAP
@@ -366,13 +367,55 @@ class UAPIPlugin(Star):
 
         # JSON/text 响应
         data = result.get("data", {})
+        is_hotboard = api["short_name"] == "misc.hotboard"
         if isinstance(data, (dict, list)):
-            formatted = json.dumps(data, ensure_ascii=False, indent=2)
+            if is_hotboard and isinstance(data, dict):
+                items = data.get("list", data.get("results", []))
+                if isinstance(items, list):
+                    platform = data.get("type", query_args.get("type", ""))
+                    update_time = data.get("update_time", "")
+                    formatted = f"# {platform} 热榜"
+                    if update_time:
+                        formatted += f"\n\n更新时间：{update_time}"
+                    for position, item in enumerate(items, start=1):
+                        if not isinstance(item, dict):
+                            continue
+                        title = str(item.get("title", "未命名条目")).replace("\n", " ")
+                        rank = item.get("index", position)
+                        hot_value = item.get("hot_value")
+                        url = item.get("url")
+                        formatted += f"\n\n## {rank}. {title}"
+                        if hot_value:
+                            formatted += f"\n热度：{hot_value}"
+                        if url:
+                            formatted += f"\n[查看详情]({url})"
+                else:
+                    formatted = json.dumps(data, ensure_ascii=False, indent=2)
+            else:
+                formatted = json.dumps(data, ensure_ascii=False, indent=2)
         else:
             formatted = str(data)
 
-        if len(formatted) > 2000:
-            formatted = formatted[:1950] + "\n\n... (内容过长已截断)"
+        if len(formatted) > 2000 or is_hotboard:
+            try:
+                render_source = (
+                    formatted
+                    if is_hotboard
+                    else f"# {api['summary']}\n\n```json\n{formatted}\n```"
+                )
+                image_path = await LocalRenderStrategy().render(
+                    render_source
+                )
+                event.track_temporary_local_file(image_path)
+                return event.chain_result(
+                    [
+                        Plain(f"{api['summary']}结果较长，已渲染为图片："),
+                        Image.fromFileSystem(image_path),
+                    ]
+                )
+            except Exception as e:
+                logger.warning(f"[UAPI] Failed to render long result: {e}")
+                formatted = formatted[:1950] + "\n\n... (内容过长已截断)"
 
         return event.plain_result(formatted)
 
@@ -726,7 +769,14 @@ def _make_tool_instance(api: dict, client: UAPIClient):
                             f"({len(result['data'])} bytes)"
                         )
                     if isinstance(data, (dict, list)):
-                        return json.dumps(data, ensure_ascii=False, indent=2)
+                        formatted = json.dumps(data, ensure_ascii=False, indent=2)
+                        if len(formatted) > 4000:
+                            return (
+                                f"[UAPI {api_name}] 返回内容过长，已截取前 4000 个字符。"
+                                "请使用 /uapi 指令获取完整图片结果。\n\n"
+                                + formatted[:4000]
+                            )
+                        return formatted
                     return str(data)
                 else:
                     return f"[UAPI {api_name}] 调用失败: {result.get('error', 'Unknown')}"
