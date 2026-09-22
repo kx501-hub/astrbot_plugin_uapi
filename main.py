@@ -733,7 +733,7 @@ def _make_tool_instance(api: dict, client: UAPIClient):
 
         async def call(
             self, context: ContextWrapper[AstrAgentContext], **kwargs
-        ) -> ToolExecResult:
+        ) -> ToolExecResult | None:
             """Execute the API call."""
             query_args = {}
             body_args = {}
@@ -770,6 +770,43 @@ def _make_tool_instance(api: dict, client: UAPIClient):
                         )
                     if isinstance(data, (dict, list)):
                         formatted = json.dumps(data, ensure_ascii=False, indent=2)
+                        if api_name == "misc.hotboard" and isinstance(data, dict):
+                            items = data.get("list", data.get("results", []))
+                            if isinstance(items, list):
+                                platform = data.get("type", "")
+                                update_time = data.get("update_time", "")
+                                formatted = f"# {platform} 热榜"
+                                if update_time:
+                                    formatted += f"\n\n更新时间：{update_time}"
+                                for position, item in enumerate(items, start=1):
+                                    if not isinstance(item, dict):
+                                        continue
+                                    title = str(item.get("title", "未命名条目")).replace(
+                                        "\n", " "
+                                    )
+                                    rank = item.get("index", position)
+                                    formatted += f"\n\n## {rank}. {title}"
+                                    if hot_value := item.get("hot_value"):
+                                        formatted += f"\n热度：{hot_value}"
+                                    if url := item.get("url"):
+                                        formatted += f"\n[查看详情]({url})"
+                                try:
+                                    image_path = await LocalRenderStrategy().render(formatted)
+                                    event = context.context.event
+                                    event.track_temporary_local_file(image_path)
+                                    event.set_result(
+                                        event.chain_result(
+                                            [
+                                                Plain(f"{platform} 热榜："),
+                                                Image.fromFileSystem(image_path),
+                                            ]
+                                        )
+                                    )
+                                    return None
+                                except Exception as e:
+                                    logger.warning(
+                                        f"[UAPI] Failed to render hotboard result: {e}"
+                                    )
                         if len(formatted) > 4000:
                             return (
                                 f"[UAPI {api_name}] 返回内容过长，已截取前 4000 个字符。"
