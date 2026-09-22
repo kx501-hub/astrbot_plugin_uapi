@@ -350,7 +350,8 @@ class UAPIPlugin(Star):
                 path=path,
                 method=method,
                 params=query_args if query_args else None,
-                json_body=body_args if body_args else None,
+                json_body=body_args if body_args and not api.get("form_data") else None,
+                form_data=body_args if body_args and api.get("form_data") else None,
             )
         except Exception as e:
             logger.error(f"[UAPI] Error calling {path}: {e}")
@@ -679,6 +680,7 @@ def _make_tool_instance(api: dict, client: UAPIClient):
     _path = path
     _query_params = query_params
     _body_params = body_params
+    _form_data = api.get("form_data", False)
 
     @dataclass
     class _DynamicTool(FunctionTool[AstrAgentContext]):
@@ -712,25 +714,23 @@ def _make_tool_instance(api: dict, client: UAPIClient):
                     path=_path,
                     method=_method,
                     params=query_args if query_args else None,
-                    json_body=body_args if body_args else None,
+                    json_body=body_args if body_args and not _form_data else None,
+                    form_data=body_args if body_args and _form_data else None,
                 )
 
                 if result.get("success"):
                     data = result.get("data", {})
                     if result.get("is_binary"):
-                        return ToolExecResult(
-                            f"[UAPI {api_name}] 返回了二进制/图片数据 ({len(result['data'])} bytes)"
+                        return (
+                            f"[UAPI {api_name}] 返回了二进制/图片数据 "
+                            f"({len(result['data'])} bytes)"
                         )
                     if isinstance(data, (dict, list)):
-                        return ToolExecResult(
-                            json.dumps(data, ensure_ascii=False, indent=2)
-                        )
-                    return ToolExecResult(str(data))
+                        return json.dumps(data, ensure_ascii=False, indent=2)
+                    return str(data)
                 else:
-                    return ToolExecResult(
-                        f"[UAPI {api_name}] 调用失败: {result.get('error', 'Unknown')}"
-                    )
+                    return f"[UAPI {api_name}] 调用失败: {result.get('error', 'Unknown')}"
             except Exception as e:
-                return ToolExecResult(f"[UAPI {api_name}] 异常: {str(e)}")
+                return f"[UAPI {api_name}] 异常: {str(e)}"
 
     return _DynamicTool()
