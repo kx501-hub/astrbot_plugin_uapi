@@ -22,6 +22,7 @@ from typing import Dict, List, Any
 
 from pydantic import Field
 from pydantic.dataclasses import dataclass
+from PIL import Image as PILImage
 
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star
@@ -42,7 +43,7 @@ body{margin:0;background:#edf2f7;font-family:"Microsoft YaHei","Noto Sans CJK SC
 </style></head><body><main class="card"><div class="brand">UAPI · ASTRBOT</div><div class="content">{{ content }}</div></main></body></html>'''
 
 HOTBOARD_TEMPLATE = '''<!doctype html><html><head><meta charset="utf-8"><style>
-*{box-sizing:border-box}body{margin:0;background:#edf2f7;font-family:"Microsoft YaHei","Noto Sans CJK SC",sans-serif;color:#172033}.card{width:960px;padding:24px 28px;background:linear-gradient(145deg,#fff,#f1f5f9);border-top:6px solid #3b82f6}.brand{font-size:12px;letter-spacing:1.2px;color:#3b82f6;font-weight:700}.title{font-size:24px;font-weight:800;margin:8px 0 3px}.meta{font-size:13px;color:#64748b;margin-bottom:14px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.item{min-width:0;padding:11px 13px;background:#fff;border:1px solid #dbe4f0;border-radius:9px}.rank{font-size:13px;color:#3b82f6;font-weight:700}.item-title{margin:3px 0 6px;font-size:16px;font-weight:700;line-height:1.3}.hot{font-size:13px;color:#475569}.url{margin-top:3px;font-size:11px;line-height:1.25;color:#2563eb;overflow-wrap:anywhere}</style></head><body><main class="card"><div class="brand">UAPI · ASTRBOT</div><div class="title">{{ platform }} 热榜</div>{% if update_time %}<div class="meta">更新时间：{{ update_time }}</div>{% endif %}<section class="grid">{% for item in items %}<article class="item"><div class="rank">{{ item.rank }}</div><div class="item-title">{{ item.title }}</div>{% if item.hot_value %}<div class="hot">热度：{{ item.hot_value }}</div>{% endif %}{% if item.url %}<div class="url">{{ item.url }}</div>{% endif %}</article>{% endfor %}</section></main></body></html>'''
+*{box-sizing:border-box}body{margin:0;background:#fff;font-family:"Microsoft YaHei","Noto Sans CJK SC",sans-serif;color:#172033}.card{width:540px;padding:20px;background:linear-gradient(145deg,#fff,#f1f5f9);border-top:6px solid #3b82f6}.brand{font-size:12px;letter-spacing:1.2px;color:#3b82f6;font-weight:700}.title{font-size:24px;font-weight:800;margin:8px 0 3px}.meta{font-size:13px;color:#64748b;margin-bottom:14px}.grid{display:grid;grid-template-columns:1fr;gap:10px}.item{min-width:0;padding:12px 14px;background:#fff;border:1px solid #dbe4f0;border-radius:9px}.rank{font-size:13px;color:#3b82f6;font-weight:700}.item-title{margin:3px 0 6px;font-size:16px;font-weight:700;line-height:1.3}.hot{font-size:13px;color:#475569}.url{margin-top:3px;font-size:11px;line-height:1.25;color:#2563eb;overflow-wrap:anywhere}</style></head><body><main class="card"><div class="brand">UAPI · ASTRBOT</div><div class="title">{{ platform }} 热榜</div>{% if update_time %}<div class="meta">更新时间：{{ update_time }}</div>{% endif %}<section class="grid">{% for item in items %}<article class="item"><div class="rank">{{ item.rank }}</div><div class="item-title">{{ item.title }}</div>{% if item.hot_value %}<div class="hot">热度：{{ item.hot_value }}</div>{% endif %}{% if item.url %}<div class="url">{{ item.url }}</div>{% endif %}</article>{% endfor %}</section></main></body></html>'''
 
 class UAPIPlugin(Star):
     """UAPI 百API插件 - 封装 100+ 免费 API"""
@@ -466,6 +467,11 @@ class UAPIPlugin(Star):
                     return_url=False,
                     options={"type": "jpeg", "quality": 100, "scale": "css"},
                 )
+                if hotboard_template_data:
+                    with PILImage.open(image_path) as rendered_image:
+                        rendered_image.crop(
+                            (0, 0, min(rendered_image.width, 540), rendered_image.height)
+                        ).save(image_path, "JPEG", quality=100)
                 event.track_temporary_local_file(image_path)
                 return event.image_result(image_path)
             except Exception as e:
@@ -882,6 +888,10 @@ def _make_tool_instance(api: dict, client: UAPIClient):
                                             "scale": "css",
                                         },
                                     )
+                                    with PILImage.open(image_path) as rendered_image:
+                                        rendered_image.crop(
+                                            (0, 0, min(rendered_image.width, 540), rendered_image.height)
+                                        ).save(image_path, "JPEG", quality=100)
                                     event = context.context.event
                                     event.track_temporary_local_file(image_path)
                                     await event.send(
