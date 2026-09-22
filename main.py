@@ -25,15 +25,21 @@ from pydantic.dataclasses import dataclass
 
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star
-from astrbot.api import logger, AstrBotConfig, FunctionTool
+from astrbot.api import html_renderer, logger, AstrBotConfig, FunctionTool
 from astrbot.api.message_components import Image, Plain, Record
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
-from astrbot.core.utils.t2i.local_strategy import LocalRenderStrategy
+from astrbot.core.message.message_event_result import MessageChain
 
 from .uapi_client import UAPIClient
 from .api_registry import API_DEFINITIONS, API_MAP
+
+PRESENTATION_TEMPLATE = '''<!doctype html><html><head><meta charset="utf-8"><style>
+body{margin:0;background:#edf2f7;font-family:"Microsoft YaHei","Noto Sans CJK SC",sans-serif;color:#172033}
+.card{width:760px;box-sizing:border-box;padding:36px 42px;background:linear-gradient(145deg,#fff,#f1f5f9);border-top:8px solid #3b82f6}
+.brand{font-size:14px;letter-spacing:1.5px;color:#3b82f6;font-weight:700;margin-bottom:18px}.content{white-space:pre-wrap;font-size:20px;line-height:1.7;word-break:break-word}.content:first-line{font-size:32px;font-weight:800;color:#0f172a}
+</style></head><body><main class="card"><div class="brand">UAPI · ASTRBOT</div><div class="content">{{ content }}</div></main></body></html>'''
 
 class UAPIPlugin(Star):
     """UAPI 百API插件 - 封装 100+ 免费 API"""
@@ -359,7 +365,12 @@ class UAPIPlugin(Star):
             return event.plain_result(f"API 调用异常: {str(e)}")
 
         if not result.get("success"):
-            error_msg = result.get("error", "未知错误")
+            error_data = result.get("data")
+            error_msg = result.get("error")
+            if not error_msg and isinstance(error_data, dict):
+                error_msg = error_data.get("message") or error_data.get("code")
+            if not error_msg:
+                error_msg = str(error_data or "未知错误")
             return event.plain_result(f"API 调用失败: {error_msg}")
 
         if result.get("is_binary"):
@@ -367,7 +378,10 @@ class UAPIPlugin(Star):
 
         # JSON/text 响应
         data = result.get("data", {})
-        is_hotboard = api["short_name"] == "misc.hotboard"
+        presentation = api["short_name"]
+        is_hotboard = presentation == "misc.hotboard"
+        is_weather = presentation == "misc.weather"
+        is_search = presentation == "search.aggregate"
         if isinstance(data, (dict, list)):
             if is_hotboard and isinstance(data, dict):
                 items = data.get("list", data.get("results", []))
@@ -388,34 +402,67 @@ class UAPIPlugin(Star):
                         if hot_value:
                             formatted += f"\n热度：{hot_value}"
                         if url:
-                            formatted += f"\n[查看详情]({url})"
+                            formatted += f"\n链接：{url}"
                 else:
                     formatted = json.dumps(data, ensure_ascii=False, indent=2)
+            elif is_weather and isinstance(data, dict):
+                location = " ".join(
+                    str(data[key])
+                    for key in ("province", "city", "district")
+                    if data.get(key)
+                )
+                formatted = f"# {location or '天气'}\n\n"
+                formatted += f"## {data.get('weather', '未知')}  {data.get('temperature', '--')}°C"
+                for label, key, suffix in (
+                    ("体感温度", "feels_like", "°C"),
+                    ("湿度", "humidity", "%"),
+                    ("风况", "wind_direction", ""),
+                    ("风力", "wind_scale", ""),
+                    ("能见度", "visibility", " km"),
+                    ("紫外线", "uv_index", ""),
+                    ("空气质量", "aqi", ""),
+                    ("更新时间", "update_time", ""),
+                ):
+                    if data.get(key) is not None:
+                        formatted += f"\n\n**{label}**：{data[key]}{suffix}"
+            elif is_search and isinstance(data, dict):
+                formatted = f"# 搜索：{data.get('query', '')}"
+                if total := data.get("total_results"):
+                    formatted += f"\n\n共找到 {total} 条结果"
+                for position, item in enumerate(data.get("results", []), start=1):
+                    if not isinstance(item, dict):
+                        continue
+                    formatted += f"\n\n## {item.get('position', position)}. {item.get('title', '未命名结果')}"
+                    if domain := item.get("domain"):
+                        formatted += f"\n来源：{domain}"
+                    if snippet := item.get("snippet"):
+                        formatted += f"\n{snippet}"
+                    if url := item.get("url"):
+                        formatted += f"\n链接：{url}"
             else:
                 formatted = json.dumps(data, ensure_ascii=False, indent=2)
         else:
             formatted = str(data)
 
-        if len(formatted) > 2000 or is_hotboard:
+        if is_hotboard or is_weather or is_search:
             try:
-                render_source = (
-                    formatted
-                    if is_hotboard
-                    else f"# {api['summary']}\n\n```json\n{formatted}\n```"
-                )
-                image_path = await LocalRenderStrategy().render(
-                    render_source
+                image_path = await html_renderer.render_custom_template(
+                    PRESENTATION_TEMPLATE,
+                    {"content": formatted.replace("# ", "").replace("## ", "").replace("**", "")},
+                    return_url=False,
+                    options={"type": "png", "quality": 90},
                 )
                 event.track_temporary_local_file(image_path)
-                return event.chain_result(
-                    [
-                        Plain(f"{api['summary']}结果较长，已渲染为图片："),
-                        Image.fromFileSystem(image_path),
-                    ]
-                )
+                return event.image_result(image_path)
             except Exception as e:
                 logger.warning(f"[UAPI] Failed to render long result: {e}")
                 formatted = formatted[:1950] + "\n\n... (内容过长已截断)"
+
+        if len(formatted) > 2000:
+            return event.plain_result(
+                f"{api['summary']}返回内容较长，当前尚未适配聊天展示。"
+                "请查看插件日志或等待该接口的专用展示器。"
+            )
 
         return event.plain_result(formatted)
 
@@ -733,7 +780,7 @@ def _make_tool_instance(api: dict, client: UAPIClient):
 
         async def call(
             self, context: ContextWrapper[AstrAgentContext], **kwargs
-        ) -> ToolExecResult | None:
+        ) -> ToolExecResult:
             """Execute the API call."""
             query_args = {}
             body_args = {}
@@ -789,20 +836,23 @@ def _make_tool_instance(api: dict, client: UAPIClient):
                                     if hot_value := item.get("hot_value"):
                                         formatted += f"\n热度：{hot_value}"
                                     if url := item.get("url"):
-                                        formatted += f"\n[查看详情]({url})"
+                                        formatted += f"\n链接：{url}"
                                 try:
-                                    image_path = await LocalRenderStrategy().render(formatted)
+                                    image_path = await html_renderer.render_custom_template(
+                                        PRESENTATION_TEMPLATE,
+                                        {"content": formatted.replace("# ", "").replace("## ", "").replace("**", "")},
+                                        return_url=False,
+                                        options={"type": "png", "quality": 90},
+                                    )
                                     event = context.context.event
                                     event.track_temporary_local_file(image_path)
-                                    event.set_result(
-                                        event.chain_result(
-                                            [
-                                                Plain(f"{platform} 热榜："),
-                                                Image.fromFileSystem(image_path),
-                                            ]
+                                    await event.send(
+                                        MessageChain(
+                                            chain=[Image.fromFileSystem(image_path)],
+                                            type="tool_direct_result",
                                         )
                                     )
-                                    return None
+                                    return "热榜图片已发送给用户。"
                                 except Exception as e:
                                     logger.warning(
                                         f"[UAPI] Failed to render hotboard result: {e}"
@@ -816,7 +866,11 @@ def _make_tool_instance(api: dict, client: UAPIClient):
                         return formatted
                     return str(data)
                 else:
-                    return f"[UAPI {api_name}] 调用失败: {result.get('error', 'Unknown')}"
+                    error_data = result.get("data")
+                    error_msg = result.get("error")
+                    if not error_msg and isinstance(error_data, dict):
+                        error_msg = error_data.get("message") or error_data.get("code")
+                    return f"[UAPI {api_name}] 调用失败: {error_msg or error_data or 'Unknown'}"
             except Exception as e:
                 return f"[UAPI {api_name}] 异常: {str(e)}"
 
