@@ -11,6 +11,7 @@ desc: |
   2. LLM Tool：将全部可用 API（~90+个）注册为 LLM 可调用的 Function Tool
 author: ナヒーダ
 version: 2.0.1
+repo: "https://github.com/kx501-hub/astrbot_plugin_uapi"
 support_platforms:
   - aiocqhttp
   - telegram
